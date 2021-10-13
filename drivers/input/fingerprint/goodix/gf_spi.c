@@ -41,11 +41,7 @@
 
 #define GF_SPIDEV_NAME "goodix,fingerprint"
 #define GF_DEV_NAME "goodix_fp"
-#if defined (CONFIG_MACH_XIAOMI_SAKURA) || defined (CONFIG_MACH_XIAOMI_DAISY)
 #define GF_INPUT_NAME "uinput-goodix"
-#else
-#define GF_INPUT_NAME "gf3208"
-#endif
 #define CHRD_DRIVER_NAME "goodix_fp_spi"
 #define CLASS_NAME "goodix_fp"
 #define N_SPI_MINORS 256
@@ -69,6 +65,7 @@ struct gf_dev {
 	unsigned users;
 	signed irq_gpio;
 	signed reset_gpio;
+	signed pwr_gpio;
 	int irq;
 	int irq_enabled;
 };
@@ -160,12 +157,15 @@ static inline int gf_parse_dts(struct gf_dev *gf_dev) {
 	struct device *dev = &gf_dev->spi->dev;
 	gf_dev->reset_gpio =
 		of_get_named_gpio(gf_dev->spi->dev.of_node, "goodix,gpio_reset", 0);
-	devm_gpio_request(dev, gf_dev->reset_gpio, "goodix,gpio_reset");
-	gpio_direction_output(gf_dev->reset_gpio, 1);
+	devm_gpio_request(dev, gf_dev->reset_gpio, "goodix_reset");
+	gpio_direction_output(gf_dev->reset_gpio, 0);
 	gf_dev->irq_gpio =
 		of_get_named_gpio(gf_dev->spi->dev.of_node, "goodix,gpio_irq", 0);
-	devm_gpio_request(dev, gf_dev->irq_gpio, "goodix,gpio_irq");
+	devm_gpio_request(dev, gf_dev->irq_gpio, "goodix_irq");
 	gpio_direction_input(gf_dev->irq_gpio);
+	gf_dev->pwr_gpio =
+		of_get_named_gpio(gf_dev->spi->dev.of_node, "goodix,gpio_pwr", 0);
+	devm_gpio_request(dev, gf_dev->pwr_gpio, "goodix_power");
 	return 0;
 }
 
@@ -271,7 +271,7 @@ static inline long gf_ioctl(struct file *filp, unsigned int cmd,
 		gf_dev->irq_enabled = 1;
 		break;
 	case GF_IOC_RESET:
-		gpio_direction_output(gf_dev->reset_gpio, 1);
+		gpio_direction_output(gf_dev->reset_gpio, 0);
 		gpio_set_value(gf_dev->reset_gpio, 0);
 		mdelay(3);
 		gpio_set_value(gf_dev->reset_gpio, 1);
@@ -314,11 +314,15 @@ static inline int gf_open(struct inode *inode, struct file *filp) {
 			if (status)
 				gf_cleanup(gf_dev);
 		}
-		gpio_direction_output(gf_dev->reset_gpio, 1);
+		/* power-on */
+		gpio_direction_output(gf_dev->pwr_gpio, 1);
+		msleep(10);
+		/* reset */
+		gpio_direction_output(gf_dev->reset_gpio, 0);
 		gpio_set_value(gf_dev->reset_gpio, 0);
 		mdelay(3);
 		gpio_set_value(gf_dev->reset_gpio, 1);
-		mdelay(3);
+		mdelay(60);
 	}
 	return status;
 }
@@ -332,6 +336,8 @@ static inline int gf_release(struct inode *inode, struct file *filp) {
 	if (!gf_dev->users) {
 		irq_cleanup(gf_dev);
 		gf_cleanup(gf_dev);
+		/* power-off */
+		gpio_direction_output(gf_dev->pwr_gpio, 0);
 	}
 	return status;
 }
@@ -355,6 +361,8 @@ static inline int gf_probe(struct platform_device *pdev) {
 	gf_dev->spi = pdev;
 	gf_dev->irq_gpio = -EINVAL;
 	gf_dev->reset_gpio = -EINVAL;
+	/* power gpio */
+	gf_dev->pwr_gpio = -EINVAL;
 	minor = find_first_zero_bit(minors, N_SPI_MINORS);
 	if (minor < N_SPI_MINORS) {
 		struct device *dev;
